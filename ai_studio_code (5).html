@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Этап 4.1: Исправленный Dual-Grid</title>
+    <style>
+        body { display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #333; font-family: monospace; color: white; }
+        #canvas-container { position: relative; }
+        canvas { border: 2px solid #555; background-color: #3d3556; image-rendering: pixelated; width: 1024px; height: 1024px; cursor: grab; }
+        canvas:active { cursor: grabbing; }
+        #coords-display { position: absolute; top: 10px; left: 10px; padding: 8px; background-color: rgba(0, 0, 0, 0.6); border-radius: 5px; pointer-events: none; font-size: 14px; }
+    </style>
+</head>
+<body>
+    <div id="canvas-container">
+        <canvas id="gameCanvas" width="512" height="512"></canvas>
+        <div id="coords-display">Координаты: (-, -)<br>Чанк: (-, -)</div>
+    </div>
+
+    <script>
+        // --- НАСТРОЙКИ ГЕНЕРАЦИИ ---
+        const WIDTH = 512, HEIGHT = 512, CHUNK_SIZE = 64, TILE_SIZE = 9;
+        const FREQUENCY = 0.03, OCTAVES = 4, SEED = Math.random();
+
+        // --- ГЛОБАЛЬНОЕ СОСТОЯНИЕ ---
+        const canvas = document.getElementById('gameCanvas'), ctx = canvas.getContext('2d');
+        const coordsDisplay = document.getElementById('coords-display');
+        let cameraX = -WIDTH / 2, cameraY = -HEIGHT / 2;
+        let isDragging = false, lastMouseX = 0, lastMouseY = 0;
+
+        // --- ЗАГРУЗКА РЕСУРСОВ ---
+        const tilemapImage = new Image();
+        let isTilemapLoaded = false;
+        tilemapImage.src = 'tilemap.png'; 
+        tilemapImage.onload = () => { isTilemapLoaded = true; console.log("Текстура tilemap.png загружена."); requestAnimationFrame(drawMap); };
+        tilemapImage.onerror = () => { console.error("Не удалось загрузить tilemap.png."); ctx.fillStyle = 'red'; ctx.font = '10px monospace'; ctx.fillText('Ошибка загрузки tilemap.png', 2, 12); };
+
+        // --- TILE MAPPING (без изменений) ---
+        const TILE_MAPPING = [
+            {x:2,y:1},{x:3,y:1},{x:2,y:2},{x:1,y:2},{x:2,y:0},{x:3,y:2},{x:0,y:1},{x:3,y:3},
+            {x:1,y:1},{x:2,y:3},{x:1,y:0},{x:0,y:2},{x:3,y:0},{x:0,y:0},{x:1,y:3},{x:0,y:3}
+        ];
+
+        // --- ШУМ (без изменений) ---
+        const SimplexNoise = (function() {const F2=0.5*(Math.sqrt(3.0)-1.0),G2=(3.0-Math.sqrt(3.0))/6.0;const grad3=[[1,1,0],[-1,1,0],[1,-1,0],[-1,-1,0],[1,0,1],[-1,0,1],[1,0,-1],[-1,0,-1],[0,1,1],[0,-1,1],[0,1,-1],[0,-1,-1]];let p=[],perm=[],permMod12=[];function init(seed){const r=(()=>{let s=seed;return ()=>(s=(s*9301+49297)%233280)/233280})();p=Array.from({length:256},()=>Math.floor(r()*256));perm=p.concat(p);permMod12=perm.map(v=>v%12)}function noise2D(x,y){let n0,n1,n2;const s=(x+y)*F2,i=Math.floor(x+s),j=Math.floor(y+s),t=(i+j)*G2,X0=i-t,Y0=j-t,x0=x-X0,y0=y-Y0;let i1,j1;if(x0>y0){i1=1;j1=0}else{i1=0;j1=1}const x1=x0-i1+G2,y1=y0-j1+G2,x2=x0-1+2*G2,y2=y0-1+2*G2,ii=i&255,jj=j&255;let t0=0.5-x0*x0-y0*y0;if(t0<0)n0=0;else{t0*=t0;const g=grad3[permMod12[ii+perm[jj]]];n0=t0*t0*(g[0]*x0+g[1]*y0)}let t1=0.5-x1*x1-y1*y1;if(t1<0)n1=0;else{t1*=t1;const g=grad3[permMod12[ii+i1+perm[jj+j1]]];n1=t1*t1*(g[0]*x1+g[1]*y1)}let t2=0.5-x2*x2-y2*y2;if(t2<0)n2=0;else{t2*=t2;const g=grad3[permMod12[ii+1+perm[jj+1]]];n2=t2*t2*(g[0]*x2+g[1]*y2)}return 70*(n0+n1+n2)}return{init,noise2D}})();
+
+        // --- ГЕНЕРАЦИЯ МИРА ---
+        const worldData = new Map();
+        function getTileData(worldX, worldY) {
+            const key = `${worldX},${worldY}`;
+            if (worldData.has(key)) return worldData.get(key);
+            let total=0,freq=FREQUENCY,amp=1,max=0;
+            for(let i=0;i<OCTAVES;i++){total+=SimplexNoise.noise2D(worldX*freq,worldY*freq)*amp;max+=amp;amp*=0.5;freq*=2;}
+            const value = (total/max+1)/2 > 0.5 ? 1:0;
+            worldData.set(key, value);
+            return value;
+        }
+
+        /**
+         * Вычисляет индекс и координаты тайла по системе Dual-Grid.
+         * Веса инвертированы для соответствия текстуре.
+         */
+        function getDualGridTileInfo(worldX, worldY) {
+            const topLeft     = getTileData(worldX, worldY);
+            const topRight    = getTileData(worldX + 1, worldY);
+            const bottomLeft  = getTileData(worldX, worldY + 1);
+            const bottomRight = getTileData(worldX + 1, worldY + 1);
+
+            // ИЗМЕНЕНИЕ ЗДЕСЬ: Порядок весов инвертирован
+            // Веса: Низ-Право=1, Низ-Лево=2, Верх-Право=4, Верх-Лево=8
+            const index = bottomRight + bottomLeft * 2 + topRight * 4 + topLeft * 8;
+            
+            return TILE_MAPPING[index];
+        }
+
+        // --- РЕНДЕРИНГ ---
+        function drawMap() {
+            if (!isTilemapLoaded) return;
+            ctx.clearRect(0, 0, WIDTH, HEIGHT);
+
+            const startTileX = Math.floor(cameraX / TILE_SIZE);
+            const startTileY = Math.floor(cameraY / TILE_SIZE);
+            const endTileX = startTileX + Math.ceil(WIDTH / TILE_SIZE) + 1;
+            const endTileY = startTileY + Math.ceil(HEIGHT / TILE_SIZE) + 1;
+
+            for (let y = startTileY; y < endTileY; y++) {
+                for (let x = startTileX; x < endTileX; x++) {
+                    const tileInfo = getDualGridTileInfo(x, y);
+                    const sourceX = tileInfo.x * TILE_SIZE, sourceY = tileInfo.y * TILE_SIZE;
+                    const destX = Math.floor(x * TILE_SIZE - cameraX), destY = Math.floor(y * TILE_SIZE - cameraY);
+                    
+                    ctx.drawImage(tilemapImage, sourceX, sourceY, TILE_SIZE, TILE_SIZE, destX, destY, TILE_SIZE, TILE_SIZE);
+                }
+            }
+            updateCoordsUI();
+        }
+        
+        // --- UI И УПРАВЛЕНИЕ ---
+        function updateCoordsUI(){const centerX=Math.floor((cameraX+WIDTH/2)/TILE_SIZE),centerY=Math.floor((cameraY+HEIGHT/2)/TILE_SIZE),chunkX=Math.floor((cameraX+WIDTH/2)/CHUNK_SIZE),chunkY=Math.floor((cameraY+HEIGHT/2)/CHUNK_SIZE);coordsDisplay.innerHTML=`Координаты: (${centerX}, ${centerY})<br>Чанк: (${chunkX}, ${chunkY})`}
+        canvas.addEventListener('mousedown',(e)=>{isDragging=true;lastMouseX=e.clientX;lastMouseY=e.clientY;canvas.style.cursor='grabbing'});
+        canvas.addEventListener('mouseup',()=>{isDragging=false;canvas.style.cursor='grab'});
+        canvas.addEventListener('mouseleave',()=>{isDragging=false;canvas.style.cursor='grab'});
+        canvas.addEventListener('mousemove',(e)=>{if(!isDragging)return;const dx=e.clientX-lastMouseX,dy=e.clientY-lastMouseY;cameraX-=dx;cameraY-=dy;lastMouseX=e.clientX;lastMouseY=e.clientY;requestAnimationFrame(drawMap)});
+
+        // --- ИНИЦИАЛИЗАЦИЯ ---
+        window.onload = () => { console.log(`Генерация мира с SEED: ${SEED}`); SimplexNoise.init(SEED); };
+    </script>
+</body>
+</html>
